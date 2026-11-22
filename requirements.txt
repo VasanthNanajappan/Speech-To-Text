@@ -1,0 +1,12 @@
+# Install PyTorch FIRST (see README): CPU-only build is much smaller.
+#   CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   GPU:  pip install torch
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+numpy
+transformers>=5.13.0,<6     # Nemotron streaming support starts at 5.13 (tested with 5.24)
+faster-whisper==1.1.1       # Whisper baseline for comparison
+# benchmark only
+jiwer
+soundfile
+scipy

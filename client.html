@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speech to text</title>
+<style>
+  :root { --bg:#0d0d0e; --surface:#1a1a1c; --surface2:#232326; --border:#2e2e32; --text:#ededee;
+          --muted:#8e8e94; --rec:#ff5c61; --warn:#f5b84a; --ok:#4cc38a; color-scheme:dark; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui, -apple-system, "Segoe UI", sans-serif;
+         max-width:780px; margin:8vh auto; padding:0 20px; line-height:1.5; }
+  h1 { font-family:Georgia, serif; font-weight:400; text-align:center; font-size:clamp(28px,5vw,40px); margin:0 0 24px; }
+  .composer { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:16px; transition:border-color .2s, box-shadow .2s; }
+  .composer.rec { border-color:var(--rec); box-shadow:0 0 0 4px rgba(255,92,97,.14); }
+  textarea { width:100%; min-height:90px; background:transparent; border:0; outline:0; color:var(--text); font:inherit; font-size:16px; resize:vertical; }
+  .live { min-height:24px; padding:4px 4px 10px; font-size:15px; }
+  .live .tentative { color:var(--muted); }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .spacer { flex:1; }
+  select, button { font:inherit; font-size:14px; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px 10px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  label.toggle { font-size:14px; color:var(--muted); display:flex; gap:6px; align-items:center; }
+  #mic { width:40px; height:36px; padding:0; display:grid; place-items:center; }
+  #mic.on { background:var(--rec); border-color:var(--rec); color:#fff; }
+  .meter { width:48px; height:6px; background:var(--surface2); border-radius:3px; overflow:hidden; }
+  .meter span { display:block; height:100%; width:0; background:var(--ok); transition:width .08s; }
+  #timer { font-variant-numeric:tabular-nums; color:var(--muted); font-size:14px; min-width:36px; }
+  #status { margin-top:10px; font-size:14px; color:var(--muted); min-height:21px; }
+  #status.err { color:var(--rec); } #status.warn { color:var(--warn); } #status.ok { color:var(--ok); }
+  .tile { margin-top:14px; display:grid; grid-template-columns:repeat(3,1fr); background:var(--surface);
+          border:1px solid var(--border); border-radius:12px; }
+  .stat { padding:12px 16px; display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .stat + .stat { border-left:1px solid var(--border); }
+  .stat .value { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .stat .label { font-size:13px; color:var(--muted); }
+  .note { margin-top:28px; color:var(--muted); font-size:13px; }
+  kbd { font-family:inherit; font-size:12px; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:0 4px; }
+  #recordPanel { display:none; margin-top:16px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px; }
+  #recordPanel textarea { min-height:60px; border:1px solid var(--border); border-radius:8px; padding:8px; margin:6px 0; }
+  #recordPanel a { color:var(--ok); margin-right:14px; font-size:14px; }
+</style>
+</head>
+<body>
+<h1>What video are we making today?</h1>
+
+<div class="composer" id="composer">
+  <textarea id="prompt" placeholder="Describe your video, or press the mic and speak…" aria-label="Video prompt"></textarea>
+  <div class="live" id="live" aria-live="polite"></div>
+  <div class="bar">
+    <select id="engine" aria-label="Speech engine"></select>
+    <label class="toggle"><input type="checkbox" id="autoStop" checked> Stop when I pause</label>
+    <span class="spacer"></span>
+    <div class="meter" aria-hidden="true"><span id="level"></span></div>
+    <span id="timer"></span>
+    <button id="mic" type="button" aria-label="Start dictation" title="Start dictation" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+  </div>
+</div>
+<div id="status" role="status">Connecting to the speech server…</div>
+
+<div class="tile" id="metrics" aria-label="Dictation stats">
+  <div class="stat" title="Time from when you start speaking until the first words appear">
+    <span class="value" id="statLatency">–</span><span class="label">Latency</span></div>
+  <div class="stat" title="Audio uploaded to the speech server (silence isn't sent)">
+    <span class="value" id="statSize">–</span><span class="label">Size</span></div>
+  <div class="stat" title="How long the mic was on">
+    <span class="value" id="statDuration">–</span><span class="label">Duration</span></div>
+</div>
+
+<div id="recordPanel">
+  <strong>Benchmark recording</strong>
+  <div class="note" style="margin-top:4px">Correct the text below to exactly what you said, then download both files into your <code>samples/</code> folder.</div>
+  <textarea id="refText" aria-label="Reference transcript"></textarea>
+  <a id="wavLink" download>Download .wav</a>
+  <a id="txtLink" download>Download .txt</a>
+</div>
+
+<p class="note">
+  <kbd>Enter</kbd> stops and keeps the text · <kbd>Esc</kbd> discards · Any video or audio playing on this page pauses while you speak.
+  Add <code>?record=1</code> to the URL to save recordings for benchmarking.
+</p>
+
+<script>
+// ------------------------------------------------------------------
+// Settings for every edge case we discussed
+// ------------------------------------------------------------------
+const TARGET_RATE = 16000;
+const CHUNK_MS = 100;            // send audio every 100 ms (low latency)
+const PREROLL_CHUNKS = 3;        // keep 300 ms before speech starts so the first syllable isn't clipped
+const HANGOVER_CHUNKS = 6;       // keep sending 600 ms after speech so word endings aren't clipped
+const MIN_SPEECH_RMS = 0.012;    // quietest level we accept as speech
+const MUTED_RMS = 0.0005;        // practically no signal: mic muted or wrong device
+const MUTED_CHECK_MS = 2000;     // warn about a muted mic after 2 s
+const NO_SPEECH_MS = 8000;       // nothing said for 8 s -> stop and tell the user
+const END_SILENCE_MS = 2500;     // 2.5 s quiet after speaking -> auto-stop (if enabled)
+const SOFT_LIMIT_S = 90;         // show "wrapping up soon"
+const HARD_LIMIT_S = 170;        // stop and keep the text (server cap is 180 s)
+const ACCIDENTAL_MS = 500;       // shorter tap with no speech = accidental, ignore quietly
+const PING_MS = 5000;            // keep the connection alive while we skip silence
+
+const $ = id => document.getElementById(id);
+const promptBox = $("prompt"), live = $("live"), micBtn = $("mic"), statusEl = $("status");
+const RECORD_MODE = new URLSearchParams(location.search).has("record");
+
+let state = "idle";              // idle | connecting | recording | finishing
+let ws, stream, audioCtx, source, node, tickTimer;
+let pending = [], pendingLen = 0, preroll = [], hangover = 0, speaking = false;
+let noiseFloor = 0.003, maxRms = 0;
+let t0 = 0, speechOnsetAt = 0, lastSpeechAt = 0, firstTextAt = 0, stopAt = 0, lastSentAt = 0;
+let bytesSent = 0, samplesTotal = 0, samplesSkipped = 0;
+let committedSoFar = "", gotFinal = false, discarding = false, softWarned = false, mutedWarned = false;
+let selStart = 0, selEnd = 0, pausedMedia = [], recordChunks = [];
+
+function setStatus(msg, kind = "") { statusEl.textContent = msg; statusEl.className = kind; }
+
+// ------------------------------------------------------------------
+// Engines from the server
+// ------------------------------------------------------------------
+async function loadEngines() {
+  try {
+    const res = await fetch("/health");
+    const h = await res.json();
+    const sel = $("engine");
+    sel.innerHTML = "";
+    for (const [name, info] of Object.entries(h.engines)) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      const lat = info.latency_ms ? ` · ${info.latency_ms} ms` : info.step_ms ? ` · step ${info.step_ms} ms` : "";
+      opt.textContent = `${name}${lat}`;
+      if (name === h.default) opt.selected = true;
+      sel.append(opt);
+    }
+    micBtn.disabled = false;
+    const missing = Object.keys(h.unavailable || {});
+    setStatus(missing.length ? `Ready. Not loaded: ${missing.join(", ")} (see server log).` : "Ready.");
+  } catch {
+    setStatus("Can't reach the speech server. Is server.py running?", "err");
+  }
+}
+
+// ------------------------------------------------------------------
+// Audio capture (runs on the browser's audio thread, not the UI thread)
+// ------------------------------------------------------------------
+const WORKLET = `
+class Pcm extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) this.port.postMessage(ch.slice(0));
+    return true;
+  }
+}
+registerProcessor("pcm", Pcm);`;
+
+// Browsers record at 44.1/48 kHz; the models want 16 kHz. Average down.
+function downsample(input, inRate) {
+  const ratio = inRate / TARGET_RATE;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const s = Math.floor(i * ratio), e = Math.floor((i + 1) * ratio);
+    let sum = 0;
+    for (let j = s; j < e; j++) sum += input[j];
+    out[i] = sum / (e - s);
+  }
+  return { out, used: Math.floor(outLen * ratio) };
+}
+
+function toInt16(f32) {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const v = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return out;
+}
+
+function rmsOf(f32) {
+  let s = 0;
+  for (let i = 0; i < f32.length; i++) s += f32[i] * f32[i];
+  return Math.sqrt(s / (f32.length || 1));
+}
+
+function sendChunk(pcm) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(pcm.buffer);
+    bytesSent += pcm.byteLength;
+    lastSentAt = performance.now();
+  }
+}
+
+// Called every ~100 ms of audio: voice activity detection decides what to send.
+function processChunk() {
+  if (!pendingLen || !audioCtx) return;
+  const merged = new Float32Array(pendingLen);
+  let o = 0; for (const p of pending) { merged.set(p, o); o += p.length; }
+  const { out, used } = downsample(merged, audioCtx.sampleRate);
+  const rest = merged.slice(used);
+  pending = rest.length ? [rest] : []; pendingLen = rest.length;
+  if (!out.length) return;
+
+  const pcm = toInt16(out);
+  samplesTotal += pcm.length;
+  if (RECORD_MODE) recordChunks.push(pcm);
+
+  const rms = rmsOf(out);
+  maxRms = Math.max(maxRms, rms);
+  $("level").style.width = Math.min(100, rms * 900) + "%";
+
+  // Adaptive VAD: speech = clearly louder than the room's background level.
+  const isSpeech = rms > Math.max(MIN_SPEECH_RMS, noiseFloor * 3);
+  if (!isSpeech) noiseFloor = Math.max(0.001, noiseFloor * 0.95 + rms * 0.05);
+  const now = performance.now();
+
+  if (isSpeech) {
+    if (!speaking) {
+      for (const p of preroll) sendChunk(p);   // include the start of the first word
+      preroll = [];
+      speaking = true;
+      if (!speechOnsetAt) speechOnsetAt = now;
+    }
+    hangover = HANGOVER_CHUNKS;
+    lastSpeechAt = now;
+    sendChunk(pcm);
+  } else if (hangover > 0) {
+    hangover--;
+    sendChunk(pcm);
+    if (hangover === 0) speaking = false;
+  } else {
+    // Silence: don't send it (saves bandwidth and server compute).
+    preroll.push(pcm);
+    if (preroll.length > PREROLL_CHUNKS) samplesSkipped += preroll.shift().length;
+  }
+}
+
+// ------------------------------------------------------------------
+// Start / stop
+// ------------------------------------------------------------------
+async function start() {
+  if (state !== "idle") return;
+  state = "connecting";
+  micBtn.disabled = true;
+  resetSession();
+  selStart = promptBox.selectionStart; selEnd = promptBox.selectionEnd;
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (e) {
+    const msgs = {
+      NotAllowedError: "Microphone access is blocked. Click the lock icon in the address bar and allow the microphone.",
+      SecurityError: "Microphone access is blocked. Click the lock icon in the address bar and allow the microphone.",
+      NotFoundError: "No microphone found. Plug one in and try again.",
+      NotReadableError: "Your microphone is being used by another app. Close it and try again.",
+      OverconstrainedError: "Your microphone doesn't support the needed settings."
+    };
+    setStatus(msgs[e.name] || "Couldn't open the microphone: " + e.message, "err");
+    state = "idle"; micBtn.disabled = false;
+    return;
+  }
+  // Mic unplugged or switched off mid-dictation: stop and keep what we have.
+  stream.getAudioTracks()[0].onended = () => {
+    if (state === "recording") { setStatus("Microphone disconnected. Kept what you said so far.", "warn"); stop(); }
+  };
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => ws.send(JSON.stringify({ engine: $("engine").value }));
+  ws.onmessage = onMessage;
+  ws.onerror = () => {};
+  ws.onclose = onClose;
+  setStatus("Connecting…");
+}
+
+async function beginCapture() {
+  audioCtx = new AudioContext();
+  const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+  await audioCtx.audioWorklet.addModule(url);
+  source = audioCtx.createMediaStreamSource(stream);
+  node = new AudioWorkletNode(audioCtx, "pcm");
+  node.port.onmessage = e => {
+    pending.push(e.data); pendingLen += e.data.length;
+    if (pendingLen >= audioCtx.sampleRate * CHUNK_MS / 1000) processChunk();
+  };
+  source.connect(node);
+
+  // Pause anything playing on the page so the mic doesn't transcribe it.
+  pausedMedia = [...document.querySelectorAll("video, audio")].filter(m => !m.paused);
+  pausedMedia.forEach(m => m.pause());
+
+  state = "recording";
+  t0 = performance.now(); lastSentAt = t0;
+  micBtn.disabled = false; micBtn.classList.add("on"); micBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14"><rect width="14" height="14" rx="3" fill="currentColor"/></svg>'; micBtn.setAttribute("aria-label", "Stop and keep the text"); micBtn.title = "Stop and keep the text";
+  $("composer").classList.add("rec");
+  setStatus("Listening… speak now.");
+  tickTimer = setInterval(tick, 200);
+}
+
+// Runs 5x per second while recording: timers for every edge case.
+function tick() {
+  if (state !== "recording") return;
+  const now = performance.now(), elapsed = now - t0, secs = Math.floor(elapsed / 1000);
+  $("timer").textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  showMetrics();
+
+  // Muted mic: essentially zero signal.
+  if (!mutedWarned && elapsed > MUTED_CHECK_MS && maxRms < MUTED_RMS) {
+    mutedWarned = true;
+    setStatus("We're not getting any sound. Is your microphone muted, or is the wrong one selected?", "warn");
+  }
+  // Pressed the mic but never spoke.
+  if (!speechOnsetAt && elapsed > NO_SPEECH_MS) {
+    setStatus(maxRms < MUTED_RMS
+      ? "No sound from your microphone. Check that it isn't muted and try again."
+      : "Didn't hear anything, so I stopped listening. Press the mic to try again.", "warn");
+    cancel(true);
+    return;
+  }
+  // Finished speaking: auto-stop after a pause.
+  if ($("autoStop").checked && speechOnsetAt && now - lastSpeechAt > END_SILENCE_MS) { stop(); return; }
+  // Long dictation.
+  if (!softWarned && secs >= SOFT_LIMIT_S) { softWarned = true; setStatus("Wrapping up soon. Recording stops at about 3 minutes.", "warn"); }
+  if (secs >= HARD_LIMIT_S) { setStatus("Reached the length limit. Kept everything you said.", "warn"); stop(); return; }
+  // Keep the connection alive while silence isn't being sent.
+  if (now - lastSentAt > PING_MS && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "ping" })); lastSentAt = now;
+  }
+}
+
+function stop() {
+  if (state !== "recording") return;
+  const elapsed = performance.now() - t0;
+  if (elapsed < ACCIDENTAL_MS && !speechOnsetAt) { cancel(true); setStatus(""); return; }  // accidental tap
+  processChunk();
+  state = "finishing";
+  stopAt = performance.now();
+  stopAudio();
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop" }));
+  micBtn.disabled = true; micBtn.textContent = "…"; micBtn.setAttribute("aria-label", "Finishing"); micBtn.title = "Finishing";
+  if (!statusEl.className) setStatus("Finishing…");
+}
+
+function cancel(quiet = false) {
+  if (state === "idle") return;
+  discarding = true;
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cancel" }));
+  cleanup();
+  if (!quiet) setStatus("Discarded.");
+}
+
+// ------------------------------------------------------------------
+// Server messages
+// ------------------------------------------------------------------
+function onMessage(e) {
+  const m = JSON.parse(e.data);
+  if (m.type === "ready") { beginCapture(); return; }
+  if (m.type === "error") {
+    setStatus(m.message || "Something went wrong.", "err");
+    discarding = true; cleanup(); return;
+  }
+  if (m.type === "partial") {
+    if (!firstTextAt && (m.committed || m.tentative)) firstTextAt = performance.now();
+    committedSoFar = m.committed || committedSoFar;
+    renderLive(m.committed, m.tentative);
+    showMetrics();
+    return;
+  }
+  if (m.type === "final") {
+    gotFinal = true;
+    const text = (m.text || "").trim();
+    if (!firstTextAt && text) firstTextAt = performance.now();
+    showMetrics(m);
+    cleanup();
+    live.textContent = "";
+    if (discarding) return;
+    if (!text) { setStatus("I couldn't make out any words. Try again a bit closer to the mic.", "warn"); return; }
+    insertAtCursor(text);
+    if (m.reason === "idle_timeout") setStatus("Stopped after a long silence. Kept your text.", "warn");
+    else if (!statusEl.classList.contains("warn")) setStatus("Added. Edit anything before sending.", "ok");
+    if (RECORD_MODE) offerRecording(text);
+  }
+}
+
+// Connection dropped before the final text arrived: keep what we already have.
+function onClose() {
+  if (state === "idle" || gotFinal || discarding) { if (state !== "idle") cleanup(); return; }
+  const kept = committedSoFar.trim();
+  cleanup();
+  live.textContent = "";
+  if (kept) { insertAtCursor(kept); setStatus("Connection lost. Kept the text you'd dictated so far.", "warn"); }
+  else setStatus("Connection lost before any text arrived. Please try again.", "err");
+}
+
+// ------------------------------------------------------------------
+// UI helpers
+// ------------------------------------------------------------------
+function renderLive(committed = "", tentative = "") {
+  live.textContent = committed + (committed && tentative ? " " : "");
+  if (tentative) { const s = document.createElement("span"); s.className = "tentative"; s.textContent = tentative; live.append(s); }
+}
+
+const fmtMs = ms => ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+const fmtSize = b => b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`;
+const fmtDur = ms => { const s = ms / 1000; return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
+function resetStats() { ["statLatency", "statSize", "statDuration"].forEach(id => $(id).textContent = "–"); }
+
+function showMetrics(final) {
+  if (speechOnsetAt && firstTextAt) $("statLatency").textContent = fmtMs(firstTextAt - speechOnsetAt);
+  if (bytesSent) $("statSize").textContent = fmtSize(bytesSent);
+  if (t0) $("statDuration").textContent = fmtDur((stopAt || performance.now()) - t0);
+}
+
+function insertAtCursor(text) {
+  const before = promptBox.value.slice(0, selStart), after = promptBox.value.slice(selEnd);
+  const left = before && !/\s$/.test(before) ? before + " " : before;
+  const right = after && !/^\s/.test(after) ? " " + after : after;
+  promptBox.value = left + text + right;
+  const caret = (left + text).length;
+  promptBox.focus();
+  promptBox.setSelectionRange(caret, caret);
+}
+
+function stopAudio() {
+  try { source && source.disconnect(); node && node.disconnect(); } catch {}
+  stream && stream.getTracks().forEach(t => t.stop());       // turns off the mic light
+  audioCtx && audioCtx.close();
+  source = node = audioCtx = stream = null;
+  pending = []; pendingLen = 0;
+  $("level").style.width = "0";
+}
+
+function cleanup() {
+  clearInterval(tickTimer);
+  stopAudio();
+  if (ws && ws.readyState <= WebSocket.OPEN) { try { ws.close(); } catch {} }
+  pausedMedia.forEach(m => m.play().catch(() => {}));       // resume anything we paused
+  pausedMedia = [];
+  state = "idle";
+  $("composer").classList.remove("rec");
+  micBtn.classList.remove("on"); micBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>'; micBtn.setAttribute("aria-label", "Start dictation"); micBtn.title = "Start dictation"; micBtn.disabled = false;
+  $("timer").textContent = "";
+}
+
+function resetSession() {
+  pending = []; pendingLen = 0; preroll = []; hangover = 0; speaking = false;
+  noiseFloor = 0.003; maxRms = 0;
+  speechOnsetAt = lastSpeechAt = firstTextAt = stopAt = 0;
+  bytesSent = samplesTotal = samplesSkipped = 0;
+  committedSoFar = ""; gotFinal = false; discarding = false; softWarned = false; mutedWarned = false;
+  recordChunks = [];
+  live.textContent = ""; resetStats();
+}
+
+// ------------------------------------------------------------------
+// ?record=1 : save your own test recordings for benchmark.py
+// (off by default; audio is only kept in memory until you download it)
+// ------------------------------------------------------------------
+function offerRecording(text) {
+  const total = recordChunks.reduce((n, c) => n + c.length, 0);
+  const pcm = new Int16Array(total);
+  let o = 0; for (const c of recordChunks) { pcm.set(c, o); o += c.length; }
+  const header = new DataView(new ArrayBuffer(44));
+  const w = (off, s) => [...s].forEach((ch, i) => header.setUint8(off + i, ch.charCodeAt(0)));
+  w(0, "RIFF"); header.setUint32(4, 36 + pcm.byteLength, true); w(8, "WAVE"); w(12, "fmt ");
+  header.setUint32(16, 16, true); header.setUint16(20, 1, true); header.setUint16(22, 1, true);
+  header.setUint32(24, TARGET_RATE, true); header.setUint32(28, TARGET_RATE * 2, true);
+  header.setUint16(32, 2, true); header.setUint16(34, 16, true); w(36, "data"); header.setUint32(40, pcm.byteLength, true);
+  const name = "sample_" + new Date().toISOString().replace(/[:.]/g, "-");
+  $("wavLink").href = URL.createObjectURL(new Blob([header, pcm], { type: "audio/wav" }));
+  $("wavLink").download = name + ".wav";
+  $("refText").value = text;
+  const updateTxt = () => {
+    $("txtLink").href = URL.createObjectURL(new Blob([$("refText").value.trim() + "\n"], { type: "text/plain" }));
+    $("txtLink").download = name + ".txt";
+  };
+  $("refText").oninput = updateTxt; updateTxt();
+  $("recordPanel").style.display = "block";
+}
+
+// ------------------------------------------------------------------
+micBtn.onclick = () => state === "recording" ? stop() : start();
+document.addEventListener("keydown", e => {
+  if (state !== "recording") return;
+  if (e.key === "Enter") { e.preventDefault(); stop(); }
+  if (e.key === "Escape") { e.preventDefault(); cancel(); }
+});
+loadEngines();
+</script>
+</body>
+</html>
